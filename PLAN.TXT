@@ -1,0 +1,8 @@
+Sunday - Basic event loop and level classes - done
+Mon  - level gen (needs tweaking), player movement, player inventory
+Tues - monster pathfinding (!!), player FOV (!!!), combat+player class
+Wed  - tea deck, tea throwing, tea drinking
+Thur - level gen redux, tea brewing!
+Fri -
+Sat -
+Sun -
