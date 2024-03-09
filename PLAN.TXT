@@ -6,3 +6,19 @@ Thur - level gen redux, tea brewing!
 Fri -
 Sat -
 Sun -
+
+hahahahahha.
+
+plan night of thursday:
+FOV: DONE!
+Tea leaf and tea items as objects: DONE
+
+plan night of friday:
+status line
+status window - return
+memory sight DONE
+movement down
+turns DONE
+inventory and tea deck
+kettle
+effects
