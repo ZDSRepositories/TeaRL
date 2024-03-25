@@ -15,7 +15,7 @@ screen = pygame.display.set_mode([WIDTH, HEIGHT])
 
 
 LCLICK, RCLICK = 1, 3
-
+THE_ALPHABET = list("abcdefghijklmnopqrstuvwxyz")
 # an enum if you squint
 class actions:
     MOVE_N, MOVE_NE, MOVE_E, MOVE_SE, MOVE_S, MOVE_SW, MOVE_W, MOVE_NW, DESCEND = [i for i in range(9)]
@@ -45,7 +45,7 @@ class effects:
     SPEEDY, HEALING, POISON, CONFUSION, RANDOM_DEBUG, \
         FARSIGHT, WARNING, ATK_BOOST, DEF_BOOST, MHP_UPGRADE, = range(10)
     special_effects = FARSIGHT, WARNING, ATK_BOOST, DEF_BOOST, MHP_UPGRADE
-    names = "speedy", "healing", "poisoned", "confused", "hm you shouldn't be seeing this", \
+    names = "speedy", "healing", "poisoned", "confused", "random", \
                 "farseeing", "paranoid", "hard-hitting", "sturdy", "invigorated"
     durations = 5, 2, 3, 3, 1, \
                     6, 6, 4, 4, 1
@@ -55,23 +55,29 @@ class factions:
     PLAYER, CAVE = range(2)
 
 class Unit:
-    def __init__(self, name, hp, maxhp, char, x, y, parent_level, faction = factions.PLAYER, energy_regen=1):
-        self.name = name
+    def __init__(self, creature_name, proper_name, hp, maxhp, max_damage, char, x, y, parent_level, faction = factions.PLAYER, energy_regen=1):
+        self.creature_name = creature_name
+        self.proper_name = proper_name
         self.hp = hp
         self.maxhp = maxhp
+        self.max_damage = max_damage
         self.char = char
         self.x, self.y = x, y
         self.view_range = 8
         self.max_inventory = 12
         self.inventory = []
+        self.tea_deck = []
+        self.max_tea_deck = 12
         self.memory = []
         self.faction = faction
         self.energy = 1
         self.energy_regen = energy_regen
         self.effects = {}
+        self.living = True
 
         self.set_level(parent_level)
         self.tile = None
+
 
     def learn_coord(self, coord):
         if not coord in self.memory:
@@ -111,7 +117,15 @@ class Unit:
         if action in actions.tile_move_actions:
             delta = directions.deltas[action]
             newpos = self.x + delta[0], self.y + delta[1]
-            if self.parent_level.valid_coords(newpos) and self.parent_level.get_tile(newpos).is_passable():
+            if self.parent_level.valid_coords(newpos):
+                # special check for kettle. this is gnarly and not in a good way
+                # "I'll make stuff more organized by abstracting movement" <-- clueless
+                if self.faction == factions.PLAYER and type(self.parent_level.get_tile(newpos).item)==Kettle:
+                    kettle = self.parent_level.get_tile(newpos).item
+                    kettle.bump(self)
+                    return False
+
+            if self.parent_level.get_tile(newpos).is_passable():
                 newtile = self.parent_level.get_tile(newpos)
                 if newtile.unit:
                     if newtile.unit.faction == self.faction and not effects.CONFUSION in self.effects:
@@ -130,8 +144,35 @@ class Unit:
             self.parent_level.parent.enter_new_level()
             return False
 
+    def get_name(self, article = True):
+        name = self.proper_name if self.proper_name else self.creature_name
+        return f"{'the ' if article and not self.proper_name else ''}{name}"
+
+    def get_attack(self):
+        return random.randint(0, self.max_damage) + (self.max_damage // 2 if effects.ATK_BOOST else 0)
+
+    def get_defense(self):
+        return 2 if effects.DEF_BOOST in self.effects else 0
+
     def attack(self, enemy):
-        print(f"{self.name} attacking {enemy.name}")
+        damage, fatal = 0, False
+        damage = max(0, self.get_attack() - enemy.get_defense())
+        enemy.hp -= damage
+        if enemy.hp <= 0:
+            enemy.die()
+            fatal = True
+        root = self.parent_level.parent
+        root.add_message(f"{self.get_name().capitalize()} "
+                         f"{'hit' if damage > 0 else 'missed'} {enemy.get_name()}"
+                         f"{'!' if damage==self.max_damage else '.'}")
+        if fatal: root.add_message(f"{enemy.get_name().capitalize()} dies!")
+        return damage, fatal
+
+    def die(self):
+        self.living = False
+        if self.inventory:
+            self.drop(self.inventory[0])
+        self.tile.clear_unit()
 
     def get_speed(self):
         return 1 if not effects.SPEEDY in self.effects else 1.5
@@ -156,6 +197,13 @@ class Unit:
         if not self.tile.item:
             self.tile.item = item
             self.inventory.remove(item)
+            if type(item)==Kettle: self.parent_level.parent.add_message("You set up the kettle. Pick it up after brewing.")
+            return True
+        return False
+
+    def add_tea(self, tea):
+        if len(self.tea_deck) < self.max_tea_deck:
+            self.tea_deck.append(tea)
             return True
         return False
 
@@ -199,7 +247,53 @@ class Tea:
         return FONT.render(self.char, True, color if color else self.color, bg_color)
 
 class Kettle:
-    pass
+    def __init__(self, root):
+        self.parent = root # kettle has to talk to the game root directly. probably unideal
+        self.leaves = [        ]
+        self.teas = []
+        self.char, self.name = "ó", "kettle"
+        self.color = (255-40, 215-40, 0)
+        self.tile = None
+        self.timer, self.prev_timer = 0, 0
+
+    def bump(self, unit):
+        if unit.faction != factions.PLAYER: return True
+        if self.timer == 0 and not self.teas:
+            self.activate()
+        elif self.timer == 0 and self.teas:
+            self.dispense_tea(unit)
+        elif self.timer != 0:
+            self.parent.add_message(f"{int(self.timer)} turns until tea is done.")
+        return False
+    def activate(self):
+        self.parent.set_modal(BrewingWindow(self.parent, self))
+
+
+    def dispense_tea(self, unit: Unit):
+        [unit.add_tea(t) for t in self.teas]
+        self.teas = []
+        self.parent.set_modal(TeaDeckWindow(self.parent, self.teas, True))
+        unit.inventory.append(self)
+        self.parent.add_message("Picked up the kettle." if len(unit.inventory)<unit.max_inventory
+                                else "You can barely stuff the kettle into your satchel.")
+        self.tile.clear_item()
+
+        pass
+
+    def tick(self):
+        if self.timer:
+            self.prev_timer = self.timer
+            self.timer -= 1 / self.parent.player.get_speed()
+            if self.timer <= 0 and self.prev_timer > 0:
+                self.parent.add_message("Done brewing!")
+                for leaf in self.leaves:
+                    self.teas.append(Tea(leaf.variety))
+                self.timer = 0
+                self.leaves = []
+
+    def rendered(self, color=None, bg_color=None) -> pygame.Surface:
+        if self.timer: color = (255, 215, 0)
+        return FONT.render(self.char, True, color if color else self.color, bg_color)
 
 class Tile:
     def __init__(self, char, passable, name, x, y, item=None, unit=None):
@@ -274,8 +368,11 @@ class Level:
             else [[c.x, c.y] for c in filter(lambda t: t.passable, self.all_tiles())]
         #print("generation done")
 
-    def generate_rect(self, num_rects):
-        initial_rect = [0, 0, self.ncols, self.nrows]
+    def los_clear(self, from_coord, to_coord):
+        line = bresenham(from_coord, to_coord)[1:-1]
+        line = filter(lambda f: self.valid_coords(f), line)
+        if all([self.get_tile(t).passable for t in line]):
+            return True
     def place_unit(self, unit, pos):
         #print(f"placing {unit.name} at {pos}")
         tile = self.get_tile(pos)
@@ -312,15 +409,16 @@ class Level:
                       [t.unit for t in list(filter(lambda t:t.unit,
                                   [t for t in self.all_tiles()]))])
     def render(self, surf):
+        ppos = [self.parent.player.x, self.parent.player.y]
+        nearby_tiles = filter(lambda t: dist([t.y, t.y], ppos) <= self.parent.player.get_viewrange(),
+                              self.all_tiles())
         for row in self.tilemap:
             for tile in row:
                 tpos = [tile.x, tile.y]
                 #print(f"rendering tile at {tpos}")
                 ppos = [self.parent.player.x, self.parent.player.y]
                 if dist(tpos, ppos) <= self.parent.player.get_viewrange():
-                    line = bresenham(tpos, ppos)[1:-1]
-                    line = filter(lambda f:self.valid_coords(f), line)
-                    if all([self.get_tile(t).passable for t in line]):
+                    if self.los_clear(tpos, ppos):
                         rendered = tile.rendered()
                         player.learn_coord([tile.x, tile.y])
                         surf.blit(rendered, [tile.x*rendered.get_width(), tile.y*rendered.get_height()])
@@ -344,12 +442,23 @@ class Level:
         except:
             return False
 
+def get_subwindow_dimensions(percentage):
+    surf_rect = pygame.Rect([0, 0, screen.get_width() * percentage, screen.get_height() * percentage])
+    surf_rect.center = screen.get_rect().center
+    surf = pygame.Surface([surf_rect.width, surf_rect.height])
+    surf.fill([0, 0, 0])
+    border_rect = pygame.Rect([0, 0, screen.get_width() * (percentage - 0.1), screen.get_height() * (percentage-0.1)])
+    border_rect.center = surf.get_rect().center
+    pygame.draw.rect(surf, [255, 255, 255], border_rect, 2, 2)
+    return surf, border_rect
+
 class GameRoot:
     def __init__(self, level: Level, player: Unit):
         self.level = level
         self.level.parent = self
         self.player = player
         self.active_modal = None
+        self.active_kettle = None
         self.messages, self.message_log = [], []
         self.turns = 0
 
@@ -398,6 +507,9 @@ class GameRoot:
                 self.advance()
 
     def advance(self):
+        kettle = self.active_kettle
+        if kettle:
+            kettle.tick()
         monsters = self.level.by_faction(factions.CAVE)
         for monster in monsters:
             if monster.energy > 1:
@@ -406,7 +518,7 @@ class GameRoot:
         self.turns += 1
 
     def enter_new_level(self):
-        new_level = Level(LEVEL_W, LEVEL_H, self.level.level_num+1)
+        new_level = Level(LEVEL_W, LEVEL_H, self.level.level_num+1 if self.level else 0)
         start = new_level.generate(LEVEL_FLOORCOUNT)
         self.player.set_level(new_level, start)
         self.player.memory = []
@@ -416,10 +528,10 @@ class GameRoot:
     def render(self, surf:pygame.Surface):
         self.level.render(surf)
         if self.messages:
-            surf.blit(FONT_MENUS.render(self.messages[0]+" --press any key--", True, [255, 255, 255], [0,0,0]), [0,0])
+            surf.blit(FONT_MENUS.render(self.messages[0]+(" --press any key--" if len(self.messages) > 1 else ""), True, [255, 255, 255], [0,0,0]), [0,0])
         pl = self.player
         status_line = \
-            f"{pl.name}  {pl.hp}/{pl.maxhp}HP  " \
+            f"{pl.proper_name}  {pl.hp}/{pl.maxhp}HP  " \
             f"Satchel: {len(pl.inventory)}/{pl.max_inventory} items  " \
             f"Cave layer {self.level.level_num}  " \
             f"Turn {self.turns}"
@@ -429,6 +541,9 @@ class GameRoot:
             centered_rect = rendered.get_rect()
             centered_rect.center = surf.get_rect().center
             surf.blit(rendered, centered_rect)
+
+    def set_kettle(self, kettle):
+        self.active_kettle = kettle
 
     def set_modal(self, modal):
         self.active_modal = modal
@@ -475,51 +590,178 @@ class InventoryWindow:
         for i in range(len(names)):
 
             name = names[i]
-            x = border_rect.centerx - 80*(1,-1)[i>5] - 25
-            y = border_rect.centery - 25*((i+1) % 6)
+            x = border_rect.centerx - (120)*(1,-1)[i>5] - 50
+            y = border_rect.top + 30*((i) % 6) + 25
             surf.blit(FONT_MENUS.render(name, antialias_menu, [255, 255, 255]),[x, y])
             surf.blit(self.parent.player.inventory[i].rendered(), [x-20, y])
+            surf.blit(FONT_MENUS.render(THE_ALPHABET[i], True, [255, 255, 255]),
+                      [x - 50, y])
 
             #print(f"blitted item {i} at {x, y}")
 
-
+        instr = FONT_MENUS.render("press letter to drop item", antialias_menu, (255, 255, 255))
+        surf.blit(instr,
+                  [border_rect.centerx - instr.get_width() // 2, border_rect.bottom - 1.5 * FONT_MENUS.get_height()])
         surf.blit(title_rendered, [border_rect.centerx-title_rendered.get_width()//2, border_rect.y+10])
-        #surf.blit(FONT_MENUS.render(" ".join(i.name for i in self.parent.player.inventory), False, [255,255,255]), [10, 10])
         return surf
 
     def handle(self, ev):
-        if ev.type == pygame.MOUSEBUTTONDOWN:
+        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == RCLICK:
             self.close()
         elif ev.type == pygame.QUIT:
             self.parent.handle(ev, delegate=False)
+        elif ev.type == pygame.TEXTINPUT:
+            key = ev.text
+            i = THE_ALPHABET.index(key)
+            if i<len(self.parent.player.inventory):
+                item = self.parent.player.inventory[i]
+                if self.parent.player.drop(item):
+                    self.close()
+
+
 
     def close(self):
         self.parent.clear_modal()
-        """
-        items = self.parent.player.inventory
-        max_columns = len(items) // 5
-        for item in items:
-            pass
-        """
+
+class BrewingWindow:
+    def __init__(self, parent: GameRoot, kettle:Kettle):
+        self.parent = parent
+        self.kettle = kettle
+
+        self.satchel_contents =list(filter(lambda i: type(i)==TeaLeaf,
+            parent.player.inventory))
+        self.kettle_contents = []
+        self.tab = 0
+        self.selected = 0
+
+
+    def rendered(self):
+        antialias_menu = True
+        surf, border_rect = get_subwindow_dimensions(0.8)
+        pygame.draw.line(surf, [255, 255, 255], [border_rect.centerx, border_rect.top + 30], [border_rect.centerx, border_rect.bottom - 30], 2)
+        title_rendered = FONT_MENUS.render("Filling the Kettle", antialias_menu, [255, 255, 255])
+        satchel_label = FONT_MENUS.render("Satchel", antialias_menu, [255, 255, 255])
+        kettle_label = FONT_MENUS.render("Kettle", antialias_menu, [255, 255, 255])
+        surf.blit(title_rendered, [border_rect.centerx - title_rendered.get_width() // 2, border_rect.y + 10])
+        surf.blit(satchel_label, [border_rect.width // 4 - kettle_label.get_width() // 2, border_rect.y + 2.5*FONT_MENUS.get_height()])
+        surf.blit(kettle_label, [border_rect.width * (3/4) - kettle_label.get_width() // 2,
+                                  border_rect.y + 2.5 * FONT_MENUS.get_height()])
+        # almost stupidest way to do this
+        # I had a stupider way
+        tvs = [tea_varieties.BLACK, tea_varieties.GREEN, tea_varieties.HERBAL, tea_varieties.ENDGAME]
+        s_counts = []
+        for tv in tvs:
+            s_counts.append(len(list(filter(lambda i: i.variety==tv, self.satchel_contents))))
+        k_counts = []
+        for tv in tvs:
+            k_counts.append(len(list(filter(lambda i: i.variety==tv, self.kettle_contents))))
+        labels = list("abcd") # I can hardcode the alphabet; not like it's gonna change, right
+        for i in range(4):
+            satchel_render = FONT_MENUS.render(f"{labels[i]} - {s_counts[i]}x {tea_varieties.names[tvs[i]]}", antialias_menu, [255, 255, 255] if self.tab==0 else [150, 150, 150])
+            kettle_render = FONT_MENUS.render(f"{labels[i]} - {k_counts[i]}x {tea_varieties.names[tvs[i]]}", antialias_menu, [255, 255, 255] if self.tab==1 else [150, 150, 150])
+            surf.blit(satchel_render,
+                      [border_rect.width // 4 - satchel_render.get_width() // 2, border_rect.y + ((i*1.5)+5)*FONT_MENUS.get_height()])
+            surf.blit(kettle_render,
+                      [border_rect.width * (3/4) - kettle_render.get_width() // 2,
+                       border_rect.y + ((i * 1.5) + 5) * FONT_MENUS.get_height()])
+        instr = FONT_MENUS.render("[tab] switches tabs", antialias_menu, (255, 255, 255))
+        surf.blit(instr,
+                  [border_rect.centerx-instr.get_width()//2, border_rect.bottom-1.5*FONT_MENUS.get_height()])
+        return surf
+
+    def handle(self, ev):
+        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == RCLICK:
+            self.close()
+        elif ev.type == pygame.QUIT:
+            self.parent.handle(ev, delegate=False)
+        elif ev.type == pygame.KEYDOWN:
+            if ev.key == pygame.K_TAB:
+                self.tab = [1, 0][self.tab]
+        if ev.type == pygame.TEXTINPUT:
+            if ev.text in list("abcd"):
+                container = [self.satchel_contents, self.kettle_contents][self.tab]
+                leaves = list(filter(lambda l: l.variety==list("abcd").index(ev.text),
+                                   container))
+                if leaves: leaf = leaves[0]
+                else: return
+
+                if self.tab == 0:
+                    if not kettle.leaves or (len(self.kettle.leaves) > 0 and self.kettle.leaves[0].variety == leaf.variety):
+                        self.parent.player.inventory.remove(leaf)
+                        self.kettle.leaves.append(leaf)
+                else:
+                    self.kettle.leaves.remove(leaf)
+                    self.parent.player.inventory.append(leaf)
+                self.satchel_contents = list(filter(lambda i: type(i) == TeaLeaf,
+                                                    self.parent.player.inventory))
+                self.kettle_contents = kettle.leaves
+
+    def close(self):
+        self.kettle.timer = int(1.5*len(self.kettle.leaves))
+        if self.kettle.timer: self.parent.add_message(f"Started a kettle of {tea_varieties.names[self.kettle.leaves[0].variety]} tea.")
+        self.parent.clear_modal()
+
+class TeaDeckWindow:
+    def __init__(self, parent:GameRoot, new_teas, rearrange=False):
+        self.parent = parent
+        self.new_teas = new_teas
+        self.rearrange = rearrange
+
+    def handle(self, ev):
+        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == RCLICK:
+            self.close()
+        elif ev.type == pygame.QUIT:
+            self.parent.handle(ev, delegate=False)
+        elif ev.type == pygame.KEYDOWN:
+            if ev.key == pygame.K_TAB:
+                self.tab = [1, 0][self.tab]
+
+    def rendered(self):
+        pl = self.parent.player
+        surf, border_rect = get_subwindow_dimensions(0.8)
+        y = border_rect.top + 1.5*FONT_MENUS.get_height()
+        for tea in pl.tea_deck:
+            tea_desc = FONT_MENUS.render(tea.name, True, [255, 255, 255])
+            tea_char = tea.rendered()
+            x=border_rect.centerx-tea_desc.get_width()//2
+            surf.blit(tea_desc, [x, y])
+            surf.blit(tea_char, [x-20, y])
+        return surf
+
+    def close(self):
+        self.parent.clear_modal()
+
+
+
 
 lev = Level(LEVEL_W, LEVEL_H, 1)
 start = lev.generate(int((72*20)*0.3))
 
-player = Unit("player", 10, 10, "@", *start, lev)
-mob =    Unit("goblin", 10, 10, "g", player.x+1, player.y+1, lev, factions.CAVE)
+player = Unit("questant", "Tom", 10, 10, 4, "@", *start, lev)
+mob =    Unit("goblin", "", 5, 5, 3, "g", player.x+1, player.y+1, lev, factions.CAVE)
+
+
 tealeaf = TeaLeaf(tea_varieties.HERBAL)
-[player.inventory.append(tealeaf) for i in range(10)]
-player.inventory.append(Kettle())
-teatile = lev.get_tile([player.x, player.y - 1])
-teatile.set_item(tealeaf)
-teatile.char, teatile.passable = ".", True
-stairtile = lev.get_tile([player.x-1, player.y])
-stairtile.char, stairtile.passable, stairtile.name = ">", True, "stairs"
+tealeaf2 = TeaLeaf(tea_varieties.BLACK)
+[player.inventory.append(tealeaf) for i in range(5)]
+player.inventory.append(tealeaf2)
+
 player.set_level(lev, [player.x, player.y])
 mob.set_level(lev, [player.x+1, player.y+1])
 
 game = GameRoot(lev, player)
+
+
+
 game.add_message("Welcome to TeaRL! '?' for help.")
+
+ktile = lev.get_tile([player.x, player.y-1])
+kettle = Kettle(game)
+ktile.set_item(kettle)
+game.set_kettle(kettle)
+
+#kettle.activate()
+
 clock = pygame.time.Clock()
 
 

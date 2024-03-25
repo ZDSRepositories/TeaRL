@@ -22,3 +22,10 @@ turns DONE
 inventory and tea deck
 kettle
 effects
+
+plan night of saturday:
+kettle & brewing, tea deck
+side ui, previous undone tasks
+throwing
+winning
+help menu
