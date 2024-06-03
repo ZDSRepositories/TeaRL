@@ -1,3 +1,5 @@
+(Disclaimer: nothing in this document was written to be a reference for readers other than myself.)
+
 Sunday - Basic event loop and level classes - done
 Mon  - level gen (needs tweaking), player movement, player inventory
 Tues - monster pathfinding (!!), player FOV (!!!), combat+player class
